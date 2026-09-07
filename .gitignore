@@ -1,0 +1,13 @@
+.research/
+dist/
+build/
+.test-output/
+plugin/worker.exe
+plugin/TagLibSharp.dll
+plugin/control.json
+plugin/status.json
+plugin/worker.lock
+node_modules/
+/task_plan.md
+/findings.md
+/progress.md

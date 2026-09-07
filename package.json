@@ -1,0 +1,10 @@
+{
+  "name": "betterdownload",
+  "version": "0.4.1",
+  "private": true,
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "test": "node --test tests/*.test.cjs",
+    "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Release"
+  }
+}

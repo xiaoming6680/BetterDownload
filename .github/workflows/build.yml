@@ -1,0 +1,60 @@
+name: Build and test plugin
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile and package development build
+        shell: pwsh
+        run: ./scripts/build.ps1
+      - name: Test conversion and background processing
+        run: node --test tests/download-hook.test.cjs tests/worker.test.cjs
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          foreach ($file in @('plugin/download-hook.js','plugin/progress-card.js','plugin/main.js')) {
+            node --check $file
+            if ($LASTEXITCODE -ne 0) { throw "Syntax check failed: $file" }
+          }
+      - name: Validate release metadata and package release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: ./scripts/build.ps1 -Release
+      - name: Package source
+        shell: pwsh
+        run: ./scripts/package-source.ps1
+      - name: Record build provenance and checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist -File) + @(Get-Item plugin/worker.exe,plugin/TagLibSharp.dll)
+          $hashes = $files | ForEach-Object { $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256; "$($hash.Hash)  $($_.Name)" }
+          $hashes | Set-Content dist/SHA256SUMS.txt -Encoding utf8
+          @{
+            repository = '${{ github.repository }}'
+            commit = '${{ github.sha }}'
+            run = 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            version = (Get-Content plugin/manifest.json -Raw | ConvertFrom-Json).version
+          } | ConvertTo-Json | Set-Content dist/build-info.json -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BetterDownload
+          path: |
+            dist/*.plugin
+            dist/*-source.zip
+            dist/SHA256SUMS.txt
+            dist/build-info.json
+            plugin/worker.exe
+            plugin/TagLibSharp.dll
+          if-no-files-found: error

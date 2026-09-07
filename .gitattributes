@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.jpg binary
+*.png binary
+*.mp3 binary
+*.flac binary
+*.exe binary
+*.dll binary
+plugin/TAGLIB-LICENSE -whitespace

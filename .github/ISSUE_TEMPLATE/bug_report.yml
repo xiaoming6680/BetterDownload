@@ -1,0 +1,31 @@
+name: 问题反馈
+description: 报告 BetterDownload 的使用问题
+title: "[问题] "
+body:
+  - type: input
+    id: versions
+    attributes:
+      label: 版本信息
+      description: Windows、网易云音乐、BetterNCM 和 BetterDownload 的版本。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 操作步骤与实际结果
+      description: 请说明如何触发问题，以及插件设置页或进度卡片显示的提示。
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: 原下载文件格式
+      options:
+        - NCM
+        - FLAC / MP3（无需转换）
+        - 不确定
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 可填写复现信息或附截图，请不要提交账号凭据或歌曲文件。
