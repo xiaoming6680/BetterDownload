@@ -10,7 +10,8 @@ const audio = ext => fs.readFileSync(path.join(__dirname, 'fixtures/tone.' + ext
 const cover = fs.readFileSync(path.join(__dirname, 'fixtures/cover.png'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function setup(t) {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nbd-测试 空格-'));
+    // The worker reports long paths; CI's temp directory is an 8.3 short path (RUNNER~1), so compare in long form.
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'nbd-测试 空格-')));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const input = path.join(root, 'VipSongsDownload'), output = path.join(input, 'unlock'), state = path.join(root, 'state');
     fs.mkdirSync(input);

@@ -1,56 +1,118 @@
+<div align="center">
+
+<img src="plugin/preview.jpg" alt="BetterDownload" width="720">
+
 # BetterDownload
 
-![BetterDownload](plugin/preview.jpg)
+**下载的 VIP 歌曲，自动变成在哪都能播放的音乐文件。**
 
-自动解锁下载的 VIP 歌曲。此 BetterNCM 插件在网易云正常完成下载后，将本地 NCM 提取为原始 FLAC / MP3，并把已有封面和歌曲信息写入音频文件。
+网易云下载完成后，BetterDownload 在本地把加密的 NCM 还原成原始 FLAC / MP3，<br>
+封面和歌曲信息一并写进文件。不用手动操作，原音质和原文件都保留。
 
-当前为 **0.5.0**：修复状态文件读写冲突造成的误报和转换程序退出，封面或标签写入失败时仍保存音频，转换程序改为按需启动，新增“转换已有下载”，并重新设计进度卡片与设置页。自动化转换测试与界面回归已通过；0.5.0 尚待真实客户端下载验收（0.4.1 已在作者的 BetterNCM 1.3.4 环境验收）。
+[下载](https://github.com/xiaoming6680/BetterDownload/releases) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/xiaoming6680/BetterDownload/issues)
 
-## 使用方式
+</div>
 
-通过 BetterNCM 安装构建出的 `.plugin`，重启网易云。插件默认启用，设置页提供启用开关、“转换已有下载”和进度卡片设置：弹出时机可选“每首歌”“仅出错”或“不显示”，样式可选“标准”或更小的单行“简洁”，停留时间可选 2、4 或 6 秒，并可直接预览。
+## 为什么需要它
 
-歌曲完成下载和标签写入后开始转换，输出固定在实际下载位置的 `VipSongsDownload/unlock`，保留歌手子目录。例如：
+网易云下载的 VIP 歌曲是加密的 `.ncm` 文件，只能在网易云里播放。想放到车机、手机或其他播放器里，或者整理自己的音乐库，就得一首首找工具转换。
+
+BetterDownload 把这一步交给插件：歌曲下载完，转换就已经做好了。
+
+## 它是怎么工作的
+
+```mermaid
+flowchart LR
+    A["在网易云下载 VIP 歌曲"] --> B["得到加密的 .ncm"]
+    B --> C["BetterDownload<br>在本地自动转换"]
+    C --> D["unlock 文件夹<br>FLAC / MP3 + 封面与歌曲信息"]
+```
 
 ```text
 D:/CloudMusic/VipSongsDownload/歌手/歌曲.ncm
 → D:/CloudMusic/VipSongsDownload/unlock/歌手/歌曲.flac
 ```
 
-右下角以 270px 亚克力卡片显示进度：左侧是歌曲内嵌的专辑封面，玻璃按封面主色带一层淡淡的环境光；标签显示音频格式，连续下载时显示本轮进度（第几首、还剩几首），完成后提供“打开文件夹”。鼠标或键盘焦点位于卡片时保持显示，离开后按设置的停留时间（默认 4 秒）向右完全退出，没有拉出入口。转换中已退出的卡片不会被普通进度更新反复唤回，任务完成可以单独提示一次。
+- **原音质**：直接取出 NCM 里的原始音频，不重新编码。原来是 FLAC 就是 FLAC，是 MP3 就是 MP3，不会“升级”，也不会降质。
+- **信息完整**：封面、标题、歌手、专辑和曲目号写进音频文件，换哪个播放器都能正常显示。
+- **原文件保留**：结果保存在下载目录的 `VipSongsDownload/unlock`，保留歌手子文件夹；NCM 源文件原样保留，也不会覆盖你已有的同名文件。
+- **完全本地**：转换在你的电脑上完成，不联网，不上传任何文件，也不依赖第三方网站。
+- **只处理新下载**：订阅网易云的下载完成事件，平时不扫描你的音乐目录；有下载才启动转换程序，空闲一分钟后自动退出。
 
-## 行为
+## 进度卡片
 
-- 从当前客户端 SDK 获取真实下载路径，订阅 `storage.addid3done` 成功事件；平时不扫描音乐目录。
-- “转换已有下载”只在用户点击时查找下载目录下的 `VipSongsDownload`（跳过 `unlock`）；转换过或 `unlock` 中已有同名音频的歌曲不会重复加入。
-- 自动识别 NCM 下载并启动转换；已是普通 FLAC / MP3 的下载不重复处理，也不弹出转换卡片。下载完成后没有出现转换卡片，可能是这首歌本来就无需解锁。
-- 有任务时才启动转换程序，空闲 1 分钟后自动退出；转换时界面 250ms 读取进度，空闲时放慢到 1–2 秒。文件仍被占用时短暂重试，没有固定 15 秒等待。
-- 原始音频帧保持不变，不重新编码。NCM 内是 MP3 就输出 MP3，不会把它升级成 FLAC。
-- 使用 TagLibSharp 嵌入已有封面、标题、专辑、歌手及曲目号，不生成封面或标签附属文件。源文件没有封面时不会联网补图。封面格式无法识别或标签写入失败时仍保存完整音频，并在卡片上说明。
-- 保留 NCM 源文件，不覆盖你已有的同名音频（另存为“歌曲 (2)”）；同一首歌重新下载时，只更新插件此前生成且未被改动的文件，不再堆积副本。临时文件验证后才提交为正式输出。
-- 转换程序无法启动（例如被安全软件拦截）时，卡片和设置页会提示，并给出需要信任的文件路径。
-- 关闭插件会撤销事件订阅并停止处理；关闭网易云后转换程序在心跳到期后退出。旧版本留下的运行副本在启动约 20 秒后清理。程序运行时不依赖第三方转换网站。
+转换时右下角会出现一张小卡片，显示专辑封面、音频格式和进度，玻璃底色会随封面颜色变化。
 
-## 兼容性
+<table>
+<tr>
+<td><img src="docs/images/card-converting.jpg" alt="转换中" width="340"></td>
+<td><img src="docs/images/card-done-light.jpg" alt="转换完成，浅色主题" width="340"></td>
+</tr>
+<tr>
+<td align="center">转换中</td>
+<td align="center">完成后可直接打开文件夹（浅色主题）</td>
+</tr>
+<tr>
+<td><img src="docs/images/card-round.jpg" alt="连续下载" width="340"></td>
+<td><img src="docs/images/card-compact.jpg" alt="简洁样式" width="340"></td>
+</tr>
+<tr>
+<td align="center">连续下载时显示第几首、还剩几首</td>
+<td align="center">简洁样式：单行显示，更不打扰</td>
+</tr>
+</table>
 
-Windows、BetterNCM >= 1.3.4、.NET Framework 4.6.2 或更新版本。下载接口面向网易云 3.x，已对照本机 3.1.37 前端源码核对，并在作者的 BetterNCM 1.3.4 环境通过真实下载转换验收；不保证全部 3.x 版本适用。未找到 SDK 时设置页提示等待接口，不会改为目录扫描。
+鼠标停在卡片上时不会收起，离开后按设置的时间自动滑出屏幕。不想被打扰，可以在设置页改成“仅出错”或“不显示”。
 
-支持 Windows 盘符路径；不处理 UNC 网络路径、目录链接或 `VipSongsDownload` 外的文件。程序和 DLL 随插件分发，用户无需安装 Node 或 Python。
+> 图中的专辑封面为示意图。
 
-## 构建与验证
+## 设置页
+
+<p align="center"><img src="docs/images/settings.jpg" alt="设置页" width="620"></p>
+
+- **启用开关**：随时暂停或恢复自动转换。
+- **转换已有下载**：找出下载目录里以前下载、还没转换的 NCM，一键加入转换，已转换过的自动跳过。
+- **进度卡片**：弹出时机（每首歌 / 仅出错 / 不显示）、样式（标准 / 简洁）、停留时间（2 / 4 / 6 秒），可以随时预览。
+
+## 安装
+
+1. 在 BetterNCM 插件商店搜索 **BetterDownload** 安装；也可以从 [Releases](https://github.com/xiaoming6680/BetterDownload/releases) 下载 `.plugin` 文件手动安装。
+2. 重启网易云音乐。插件默认启用，之后正常下载歌曲即可。
+
+需要 Windows、BetterNCM 1.3.4 或更新版本、网易云音乐 3.x。转换程序使用 .NET Framework 4.6.2 或更新版本，Windows 10 / 11 已自带。
+
+## 常见问题
+
+**下载完成后没有出现卡片？**
+这首歌可能本来就是普通 FLAC / MP3，不需要解锁；也可能弹出时机被设成了“仅出错”或“不显示”。
+
+**以前下载的歌能转换吗？**
+可以。打开设置页，点“转换已有下载”里的“查找并转换”。
+
+**提示“转换程序没有运行，可能被安全软件拦截”？**
+部分安全软件会拦截插件自带的转换程序 `worker.exe`。按提示把它加入信任，插件会自动重试。
+
+**会覆盖我原来的文件吗？**
+不会。`unlock` 中已有同名文件时，新文件另存为“歌曲 (2)”。只有插件自己生成、并且你没改动过的文件，才会在重新下载同一首歌时被更新。
+
+**封面或歌曲信息没写进去？**
+音频会照常保存，卡片上会说明哪一部分没写入，例如封面格式无法识别。
+
+**哪些情况不处理？**
+UNC 网络路径、目录链接，以及 `VipSongsDownload` 以外的文件。
+
+## 开发者
 
 Windows 下运行：
 
 ```powershell
-npm run build
-npm test
+npm run build   # 编译 worker.exe 并打包到 dist/
+npm test        # 转换、下载事件与后台处理测试
 ```
 
-构建首次需要网络从 NuGet 下载固定版本的 TagLibSharp 和 Roslyn 编译器（Microsoft.Net.Compilers.Toolset 5.9.0），并校验 SHA256；运行插件不需要该下载过程。输出在 `dist/`。
+首次构建会从 NuGet 下载固定版本的 TagLibSharp 和 Roslyn 编译器，并校验哈希。编译启用 `/deterministic`，同一份源码在任何机器上编出的 `worker.exe` 逐字节一致，Actions 会核对仓库中的程序，详见 [构建来源](docs/BUILD.md)。
 
-编译启用 `/deterministic`：同一份源码在任何 Windows 机器上编出的 `worker.exe` 逐字节一致，Actions 会核对仓库中的程序是否由当前源码构建，见 [构建来源](docs/BUILD.md)。
-
-界面验证需要 Playwright 和浏览器：
+界面回归需要 Playwright，截图写入 `build/`：
 
 ```powershell
 npm install --no-save playwright
@@ -58,14 +120,18 @@ $env:NBD_BROWSER_CHANNEL = 'msedge'
 node scripts/ui-check.cjs
 ```
 
-脚本会把卡片与设置页（深色、浅色、窄窗口）截图写入 `build/`，便于目视检查。
+| 文件 | 作用 |
+| --- | --- |
+| `src/Worker.cs` | 任务队列、NCM 提取、文件保护与空闲退出 |
+| `src/Metadata.cs` | 用 TagLibSharp 写入封面与标签 |
+| `plugin/download-hook.js` | 订阅网易云下载完成事件 |
+| `plugin/main.js` | 设置页与转换程序的生命周期 |
+| `plugin/progress-card.js` | 进度卡片 |
 
-源码 `src/Worker.cs` 负责队列、容器提取和文件保护；`src/Metadata.cs` 负责内嵌标签；`plugin/download-hook.js` 负责原生下载事件；`plugin/progress-card.js` 与 `plugin/main.js` 负责界面和工作程序生命周期。
+验证记录见 [VALIDATION.md](docs/VALIDATION.md)，发布流程见 [PUBLISHING.md](docs/PUBLISHING.md)。
 
-完整记录见 [验证文档](docs/VALIDATION.md)。商店登记、Actions 产物和 PR 步骤见 [发布指南](docs/PUBLISHING.md)。
+## 开源协议
 
-## 开源
+GPL-3.0-or-later。TagLibSharp 2.3.0 的 LGPL 许可证与源码地址见 `plugin/TAGLIB-LICENSE` 和 `plugin/NOTICE.md`。
 
-本项目采用 GPL-3.0-or-later，完整源码应随发布保持可获得。TagLibSharp 2.3.0 的 LGPL 许可证与源码地址见 `plugin/TAGLIB-LICENSE` 和 `plugin/NOTICE.md`。
-
-作者：[XIAOMING6680](https://github.com/xiaoming6680)。[下载更新](https://github.com/xiaoming6680/BetterDownload/releases) · [问题反馈](https://github.com/xiaoming6680/BetterDownload/issues)。插件标识保留 `ncm-better-download`，支持已有开发版覆盖升级。
+作者 [XIAOMING6680](https://github.com/xiaoming6680)。插件标识为 `ncm-better-download`。
