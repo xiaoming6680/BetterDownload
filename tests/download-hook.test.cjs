@@ -9,6 +9,10 @@ test('rejects incomplete paths, traversal, other formats, non-VIP files and unlo
     for (const p of ['../VipSongsDownload/a.ncm', 'D:/VipSongsDownload/../a.ncm', 'VipSongsDownload/a.mp3', 'other/a.ncm', 'VipSongsDownload/unlock/a.ncm', 'D:/VipSongsDownload/a:ads.ncm', 'VipSongsDownload/"a.ncm']) assert.equal(hook.resolveJob(p, 'D:/CloudMusic'), null, p);
     assert.equal(hook.resolveJob('VipSongsDownload/a.ncm', ''), null);
 });
+test('a search covers only VipSongsDownload under a valid download directory', () => {
+    assert.equal(hook.scanRoot('D:/CloudMusic/'), 'D:\\CloudMusic\\VipSongsDownload');
+    for (const root of ['', 'CloudMusic', 'D:/Music/../x', undefined]) assert.equal(hook.scanRoot(root), '', String(root));
+});
 test('observes successful ID3 completion only; detaches its own listener; root changes apply immediately', async () => {
     let callback, removed; const jobs = [];
     const sdk = { Storage: { downloadDir: 'D:/Music' }, Bridge: {

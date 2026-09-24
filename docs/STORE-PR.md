@@ -1,11 +1,11 @@
 # 商店更新说明
 
-BetterDownload 0.4.2 更新预览图，将图标、名称和功能说明居中，增加左右留白。图片已压缩为 960 × 480 JPG（34,641 字节），插件运行逻辑未改动。
+BetterDownload 0.5.0 修复状态文件读写冲突造成的误报与转换程序退出；封面或标签写入失败时仍保存音频；转换程序改为按需启动；新增“转换已有下载”；重新设计进度卡片（专辑封面、环境光、本轮计数）与设置页。
 
 - 源码：https://github.com/xiaoming6680/BetterDownload
-- 发布：https://github.com/xiaoming6680/BetterDownload/releases/tag/v0.4.2
+- 发布：https://github.com/xiaoming6680/BetterDownload/releases/tag/v0.5.0
 - 作者：XIAOMING6680
-- 工作程序沿用已验证的 Actions 产物，构建来源见 [BUILD.md](BUILD.md)。
+- `worker.exe` 由固定版本的 Roslyn 确定性编译，可按 [BUILD.md](BUILD.md) 重新构建并比对哈希。
 - 版本安装包由标签对应的 Actions 构建，发布附件附构建信息与校验文件。
 
-首次登记 #737 已合并；此前的 0.4.1 同步申请为 #750。以 0.4.2 作为本次上架版本。
+首次登记 #737 已合并；0.4.1 同步申请为 #750。提交本次更新前需完成 0.5.0 的真实客户端下载验收。

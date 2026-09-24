@@ -1,4 +1,4 @@
-param([switch]$Release)
+﻿param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pluginDir = Join-Path $projectRoot 'plugin'

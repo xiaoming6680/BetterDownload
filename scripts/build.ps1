@@ -1,4 +1,4 @@
-param([switch]$Release)
+﻿param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pluginDir = Join-Path $projectRoot 'plugin'
@@ -9,9 +9,9 @@ if ($Release) {
     if ($manifest.author -eq '待填写' -or -not $manifest.author) { throw '请先填写 manifest.json 的 author。' }
     if ($links.repository -notmatch '^https://github\.com/[^/]+/[^/]+/?$' -or $links.issues -notmatch '^https://github\.com/[^/]+/[^/]+/issues/?$') { throw '请先填写 release.json 的 repository 和 issues。' }
 }
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe' }
-& $compiler /nologo /target:exe /platform:anycpu /optimize+ /reference:System.Web.Extensions.dll "/reference:$pluginDir/TagLibSharp.dll" "/out:$pluginDir/worker.exe" (Join-Path $projectRoot 'src/Worker.cs') (Join-Path $projectRoot 'src/Metadata.cs')
+$compiler = @(& (Join-Path $PSScriptRoot 'restore-compiler.ps1'))[-1]
+# /deterministic: identical source gives an identical worker.exe on any machine. winexe: no console window can appear.
+& $compiler /nologo /deterministic /debug- /target:winexe /platform:anycpu /optimize+ /reference:System.Web.Extensions.dll "/reference:$pluginDir/TagLibSharp.dll" "/out:$pluginDir/worker.exe" (Join-Path $projectRoot 'src/Worker.cs') (Join-Path $projectRoot 'src/Metadata.cs')
 if ($LASTEXITCODE -ne 0) { throw 'C# 编译失败。' }
 & (Join-Path $PSScriptRoot 'check-release.ps1') -Release:$Release
 $dist = Join-Path $projectRoot 'dist'

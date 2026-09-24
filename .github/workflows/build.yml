@@ -19,6 +19,16 @@ jobs:
       - name: Compile and package development build
         shell: pwsh
         run: ./scripts/build.ps1
+      - name: Check committed binaries match this source
+        shell: pwsh
+        run: |
+          # The build is deterministic, so the committed worker.exe must equal the one just compiled.
+          git diff --quiet -- plugin/worker.exe plugin/TagLibSharp.dll
+          if ($LASTEXITCODE -ne 0) {
+            if ('${{ github.ref }}' -like 'refs/tags/v*') { throw 'plugin/worker.exe does not match a deterministic build of this commit.' }
+            Write-Output '::warning::plugin/worker.exe differs from this build; commit the rebuilt binary together with the source change.'
+          }
+          exit 0
       - name: Test conversion and background processing
         run: node --test tests/download-hook.test.cjs tests/worker.test.cjs
       - name: Check JavaScript syntax

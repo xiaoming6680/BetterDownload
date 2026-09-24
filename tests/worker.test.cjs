@@ -53,17 +53,65 @@ for (const ext of ['flac', 'mp3']) test(ext + ': native job preserves audio fram
     assert.deepEqual(fs.readdirSync(path.dirname(output)), ['歌曲.' + ext]);
     assert.equal(s.status().activity.state, 'success');
     assert.equal(s.status().activity.percent, 100);
-    assert.deepEqual(s.status().acknowledged, ['job-1']);
+    assert.deepEqual(Object.keys(s.status().results), ['job-1']);
+    assert.equal(s.status().results['job-1'].output, output);
+    // The card gets the format and a copy of the embedded cover beside control.json.
+    assert.equal(s.status().activity.format, ext.toUpperCase());
+    assert.equal(path.dirname(s.status().activity.cover), path.join(s.root, 'covers'));
+    assert.deepEqual(fs.readFileSync(s.status().activity.cover), cover);
     assert.equal(s.run().status, 0); assert.equal(fs.readdirSync(path.dirname(output)).length, 1);
     fs.unlinkSync(output); assert.equal(s.run().status, 0); assert.ok(fs.existsSync(output));
 });
 test('no metadata/cover, filename conflicts and changed source preserve existing files', t => {
     const s = setup(t), job = s.job('歌曲.ncm', fixture(audio('mp3'), { metadata: false, cover: Buffer.alloc(0) }));
-    fs.mkdirSync(s.output); const existing = path.join(s.output, '歌曲.mp3'); fs.writeFileSync(existing, 'keep');
+    fs.mkdirSync(s.output); const existing = path.join(s.output, '歌曲.mp3'), own = path.join(s.output, '歌曲 (2).mp3'); fs.writeFileSync(existing, 'keep');
     assert.equal(s.run().status, 0); assert.equal(fs.readFileSync(existing, 'utf8'), 'keep');
-    assert.deepEqual(frames(fs.readFileSync(path.join(s.output, '歌曲 (2).mp3')), 'mp3'), frames(audio('mp3'), 'mp3'));
+    assert.deepEqual(frames(fs.readFileSync(own), 'mp3'), frames(audio('mp3'), 'mp3'));
+    // Downloading the same song again refreshes the file this plugin wrote instead of adding "(3)".
     fs.writeFileSync(job.source, fixture(audio('mp3')));
+    assert.equal(s.run().status, 0); assert.ok(!fs.existsSync(path.join(s.output, '歌曲 (3).mp3')));
+    assert.ok(fs.readFileSync(own).includes(Buffer.from('合成测试', 'utf16le')) || fs.readFileSync(own).includes(Buffer.from('合成测试')));
+    assert.equal(fs.readFileSync(existing, 'utf8'), 'keep');
+    // Once the user has changed that file, it is never replaced.
+    fs.appendFileSync(own, 'edited');
+    fs.writeFileSync(job.source, fixture(audio('mp3'), { metadata: false }));
     assert.equal(s.run().status, 0); assert.ok(fs.existsSync(path.join(s.output, '歌曲 (3).mp3')));
+    assert.ok(fs.readFileSync(own).subarray(-6).equals(Buffer.from('edited')));
+});
+test('unreadable cover or tags never cost the audio', t => {
+    const s = setup(t);
+    s.job('gif.ncm', fixture(audio('flac'), { cover: Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(64)]) }));
+    const broken = Buffer.concat([Buffer.from('fLaC'), Buffer.alloc(64, 0xff)]);
+    s.job('broken.ncm', fixture(broken));
+    assert.equal(s.run().status, 0, JSON.stringify(s.status()));
+    const gif = fs.readFileSync(path.join(s.output, 'gif.flac'));
+    assert.deepEqual(frames(gif, 'flac'), frames(audio('flac'), 'flac'));
+    assert.ok(!gif.includes(Buffer.from('GIF89a')));
+    assert.match(s.status().results['job-1'].warning, /封面格式无法识别/);
+    // TagLib cannot parse this stream; the untouched audio is written again without tags.
+    assert.deepEqual(fs.readFileSync(path.join(s.output, 'broken.flac')), broken);
+    assert.match(s.status().results['job-2'].warning, /已保存原始音频/);
+    assert.equal(s.status().failed, 0);
+    assert.deepEqual(fs.readdirSync(s.output).sort(), ['broken.flac', 'gif.flac']);
+});
+test('user-requested search lists unconverted NCM downloads only', t => {
+    const s = setup(t);
+    for (const name of ['new.ncm', '歌手/second.ncm', 'done.ncm', 'unlock/x/inside.ncm']) {
+        fs.mkdirSync(path.dirname(path.join(s.input, name)), { recursive: true });
+        fs.writeFileSync(path.join(s.input, name), fixture(audio('flac')));
+    }
+    fs.writeFileSync(path.join(s.input, 'plain.mp3'), audio('mp3'));
+    fs.writeFileSync(path.join(s.output, 'done.flac'), 'converted earlier');
+    s.config.scan = { id: 'scan-1', root: s.input }; s.save();
+    assert.equal(s.run().status, 0);
+    const scan = s.status().scan;
+    assert.equal(scan.id, 'scan-1'); assert.equal(scan.error, '');
+    assert.deepEqual(scan.files, [path.join(s.input, 'new.ncm'), path.join(s.input, '歌手', 'second.ncm')]);
+    assert.equal(scan.skipped, 1);
+    // Searching converts nothing by itself; the plugin queues the reported files.
+    assert.ok(!fs.existsSync(path.join(s.output, 'new.flac')));
+    s.config.scan = { id: 'scan-2', root: s.root }; s.save();
+    s.run(); assert.match(s.status().scan.error, /VipSongsDownload/);
 });
 test('malformed/truncated containers, oversized key and unknown audio fail without leftovers', t => {
     const s = setup(t);
@@ -112,4 +160,36 @@ test('warm worker processes an event promptly and exits when disabled', { timeou
     assert.deepEqual(frames(fs.readFileSync(output), 'flac'), frames(audio('flac'), 'flac'));
     s.config.enabled = false; s.save();
     assert.equal(await Promise.race([exited, sleep(3000).then(() => 'timeout')]), 0);
+});
+test('a reader holding status.json neither stops the worker nor fails a finished song', { timeout: 20000 }, async t => {
+    const s = setup(t), child = spawn(s.copy(), [], { windowsHide: true, stdio: 'ignore' });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    const beat = setInterval(() => { s.config.heartbeat = Date.now(); s.save(); }, 1000);
+    t.after(async () => { clearInterval(beat); if (child.exitCode === null) { child.kill(); await exited; } });
+    const statusPath = path.join(s.root, 'status.json'), read = () => { try { return s.status(); } catch (_) { return null; } };
+    s.job('song.ncm', fixture(audio('flac')));
+    for (const deadline = Date.now() + 6000; Date.now() < deadline && !(read() && read().activity && read().activity.state === 'success');) await sleep(50);
+    assert.equal(read().activity.state, 'success');
+    // BetterNCM opens files without FILE_SHARE_DELETE, so File.Replace fails while the plugin reads status.json.
+    const hold = spawn('powershell', ['-NoProfile', '-Command', "$f = [IO.File]::Open($env:NBD_HOLD, 'Open', 'Read', 'ReadWrite'); 'held'; Start-Sleep -Milliseconds 3000; $f.Close()"], { windowsHide: true, env: { ...process.env, NBD_HOLD: statusPath } });
+    await new Promise(resolve => hold.stdout.once('data', resolve));
+    await new Promise(resolve => hold.once('exit', resolve));
+    const released = Date.now();
+    while (Date.now() - released < 3000 && !(read() && read().heartbeat >= released)) await sleep(50);
+    assert.equal(child.exitCode, null, 'worker must survive a blocked status write');
+    const status = read();
+    assert.ok(status.heartbeat >= released, 'status writes resume once the reader lets go');
+    assert.equal(status.failed, 0); assert.equal(status.activity.state, 'success');
+    assert.deepEqual(fs.readdirSync(s.root).filter(name => name.endsWith('.tmp')), []);
+    s.config.enabled = false; s.save();
+    assert.equal(await Promise.race([exited, sleep(3000).then(() => 'timeout')]), 0);
+});
+test('an idle worker exits on its own', { timeout: 15000 }, async t => {
+    const s = setup(t); s.config.idle = 1500; s.save();
+    const start = Date.now(), child = spawn(s.copy(), [], { windowsHide: true, stdio: 'ignore' });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    t.after(async () => { if (child.exitCode === null) { child.kill(); await exited; } });
+    assert.equal(await Promise.race([exited, sleep(8000).then(() => 'timeout')]), 0);
+    assert.ok(Date.now() - start >= 1400);
+    assert.equal(s.status().state, 'stopped'); assert.match(s.status().message, /空闲/);
 });

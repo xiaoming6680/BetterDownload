@@ -7,17 +7,19 @@
 1. 修改代码后同步递增 `plugin/manifest.json` 和 `package.json` 版本。
 2. 推送 `main`，等待 `Build and test plugin` 工作流通过。工作流编译程序、验证依赖哈希、运行测试并生成源码包。
 3. 下载 `BetterDownload` artifact。`dist/build-info.json` 记录对应源码提交与构建地址，`dist/SHA256SUMS.txt` 记录产物哈希。
-4. 商店同步源码仓库的 `plugin/` 目录。将对应 Actions 产物 `worker.exe` 和 `TagLibSharp.dll` 放回该目录并提交：
+4. 商店同步源码仓库的 `plugin/` 目录。构建是确定性的，本地 `npm run build` 与 Actions 编出的 `worker.exe` 逐字节相同；源码改动后把重新构建的程序和源码一起提交：
 
 ```powershell
 git add -f plugin/worker.exe plugin/TagLibSharp.dll
-git commit -m 'Update Actions build artifacts'
+git commit -m 'Update worker build'
 git push
 ```
 
+工作流的 “Check committed binaries match this source” 步骤会核对仓库中的程序：普通推送不一致时给出警告，标签构建不一致时失败。
+
 5. 推送 `v版本号` 标签后，工作流还会生成正式命名的 `.plugin`。将该 Actions 产物、源码包与校验文件作为 GitHub Release 附件；未经完整客户端验收的版本标记为 Pre-release。
 
-工作程序与依赖变化时必须递增版本，避免使用之前版本的运行副本。禁止把本地编译程序标记为 Actions 产物。
+工作程序与依赖变化时必须递增版本，避免使用之前版本的运行副本。
 
 ## 客户端验收
 

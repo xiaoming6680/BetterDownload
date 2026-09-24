@@ -13,144 +13,296 @@ namespace NcmBetterDownload {
         public string source = "";
         public string target = "";
     }
+    public sealed class ScanRequest {
+        public string id = "";
+        public string root = "";
+    }
     public sealed class Control {
         public string session = "";
         public long heartbeat;
         public bool enabled;
         public string state = "";
+        public long idle;
+        public ScanRequest scan;
         public Job[] jobs = new Job[0];
     }
     public sealed class Receipt {
         public string signature;
         public string output;
         public long length;
+        public long written;
+        // True while the output is still exactly the file the worker wrote.
+        public bool Intact() {
+            if (String.IsNullOrEmpty(output) || !File.Exists(output)) return false;
+            var file = new FileInfo(output);
+            return file.Length == length && file.LastWriteTimeUtc.Ticks == written;
+        }
+    }
+    public sealed class Extracted {
+        public string path = "";
+        public string warning = "";
     }
     public static class Worker {
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         static readonly Encoding Utf8 = new UTF8Encoding(false);
         static readonly List<object> Events = new List<object>();
-        static readonly HashSet<string> Acknowledged = new HashSet<string>();
+        static readonly Dictionary<string, object> Results = new Dictionary<string, object>();
         static readonly Dictionary<string, int> Attempts = new Dictionary<string, int>();
         static Dictionary<string, Receipt> Receipts = new Dictionary<string, Receipt>(StringComparer.OrdinalIgnoreCase);
-        static string ControlPath, StatusPath, ReceiptPath, Session;
+        static string ControlPath, StatusPath, ReceiptPath, Session, ScanId;
         static int Converted, Failed;
-        static DateTime LastStatus, LastAlive;
-        static object Activity;
-        static string ActivityState = "", CurrentJob = "", CurrentPath = "";
+        static DateTime LastStatus, LastAlive, LastControlAt, LastBusy;
+        static Control LastControl;
+        static object Activity, Scan;
+        static string ActivityState = "", CurrentJob = "", CurrentPath = "", CurrentCover = "", CurrentFormat = "";
         public static long Now() { return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds; }
         public static string Full(string path) { return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+        public static string Signature(FileInfo file) { return file.Length + ":" + file.LastWriteTimeUtc.Ticks; }
         public static void WriteJson(string path, object value) {
             string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try {
                 File.WriteAllText(temp, Json.Serialize(value), Utf8);
                 if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
-            } finally { if (File.Exists(temp)) File.Delete(temp); }
+            } finally { try { if (File.Exists(temp)) File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+        }
+        // BetterNCM reads files without FILE_SHARE_DELETE, so File.Replace fails while the plugin polls status.json.
+        static bool TryWriteJson(string path, object value) {
+            for (int attempt = 0; ; attempt++) {
+                try { WriteJson(path, value); return true; }
+                catch (Exception e) {
+                    if (!(e is IOException) && !(e is UnauthorizedAccessException)) throw;
+                    if (attempt >= 4) return false;
+                    Thread.Sleep(10 * (attempt + 1));
+                }
+            }
         }
         static Control ReadControl() {
             for (int attempt = 0; ; attempt++) {
                 try {
-                    var result = Json.Deserialize<Control>(File.ReadAllText(ControlPath, Utf8));
+                    string text;
+                    // Share write and delete so the plugin can rewrite control.json while it is being read.
+                    using (var stream = new FileStream(ControlPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var reader = new StreamReader(stream, Utf8)) text = reader.ReadToEnd();
+                    var result = Json.Deserialize<Control>(text);
                     if (result == null) throw new InvalidDataException("配置正在写入。");
                     return result;
                 } catch { if (attempt >= 3) throw; Thread.Sleep(20); }
             }
         }
+        // The plugin rewrites control.json in place; a briefly unreadable file keeps the last good copy.
+        static Control Current() {
+            try { LastControl = ReadControl(); LastControlAt = DateTime.UtcNow; }
+            catch { if (LastControl == null || DateTime.UtcNow - LastControlAt > TimeSpan.FromSeconds(5)) throw; }
+            return LastControl;
+        }
+        static bool Alive(Control c) { return c.enabled && c.session == Session && Now() - c.heartbeat < 15000 && Now() >= c.heartbeat - 5000; }
         static bool Alive() {
-            try { var c = ReadControl(); return c.enabled && c.session == Session && Now() - c.heartbeat < 15000 && Now() >= c.heartbeat - 5000; }
+            try { return Alive(Current()); }
             catch { return false; }
         }
         static bool ContinueConversion() {
             if (DateTime.UtcNow - LastAlive < TimeSpan.FromMilliseconds(100)) return true;
             LastAlive = DateTime.UtcNow; return Alive();
         }
-        static void Report(string state, string message, string path = "", bool add = true, int percent = 0) {
+        static TimeSpan IdleLimit(Control control) { return TimeSpan.FromMilliseconds(control.idle > 0 ? Math.Max(1000, Math.Min(control.idle, 600000)) : 60000); }
+        static void Report(string state, string message, string path = "", bool add = true, int percent = 0, string warning = "") {
             if (state == "converting" || state == "success" || state == "error" || (state == "stopped" && ActivityState == "converting")) {
-                Activity = new { id = CurrentJob, state, message, path = path.Length > 0 ? path : CurrentPath, output = state == "success" ? path : "", percent = state == "success" ? 100 : percent };
+                Activity = new { id = CurrentJob, state, message, path = path.Length > 0 ? path : CurrentPath, output = state == "success" ? path : "", percent = state == "success" ? 100 : percent, warning, cover = CurrentCover, format = CurrentFormat };
                 ActivityState = state;
             }
             if (add) {
                 Events.Insert(0, new { time = Now(), state, message, path });
                 if (Events.Count > 30) Events.RemoveAt(30);
             }
-            WriteJson(StatusPath, new { session = Session, heartbeat = Now(), state, message, converted = Converted, failed = Failed, events = Events, activity = Activity, acknowledged = Acknowledged.ToArray() });
-            LastStatus = DateTime.UtcNow;
+            // Status is advisory: a failed write is retried by the next report and never fails a conversion.
+            if (TryWriteJson(StatusPath, new { session = Session, heartbeat = Now(), state, message, converted = Converted, failed = Failed, events = Events, activity = Activity, results = Results, scan = Scan })) LastStatus = DateTime.UtcNow;
+        }
+        public static string UnlockTarget(string source) {
+            var parts = Full(source).Split(Path.DirectorySeparatorChar);
+            int vip = Array.FindIndex(parts, p => p.Equals("VipSongsDownload", StringComparison.OrdinalIgnoreCase));
+            if (vip < 1 || vip >= parts.Length - 1 || parts.Skip(vip + 1).Take(parts.Length - vip - 2).Any(p => p.Equals("unlock", StringComparison.OrdinalIgnoreCase))) return null;
+            return String.Join(Path.DirectorySeparatorChar.ToString(), parts.Take(vip + 1).Concat(new [] { "unlock" }).Concat(parts.Skip(vip + 1)));
         }
         public static void Validate(Job job) {
             if (String.IsNullOrEmpty(job.id) || String.IsNullOrEmpty(job.source) || !Path.IsPathRooted(job.source) || !Path.IsPathRooted(job.target)) throw new InvalidDataException("无效的下载任务。");
             string source = Full(job.source);
             if (!Path.GetExtension(source).Equals(".ncm", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("任务不是 NCM 文件。");
-            var parts = source.Split(Path.DirectorySeparatorChar);
-            int vip = Array.FindIndex(parts, p => p.Equals("VipSongsDownload", StringComparison.OrdinalIgnoreCase));
-            if (vip < 1 || parts.Skip(vip + 1).Take(parts.Length - vip - 2).Any(p => p.Equals("unlock", StringComparison.OrdinalIgnoreCase))) throw new InvalidDataException("只处理 VipSongsDownload 中的下载完成任务。");
-            string expected = String.Join(Path.DirectorySeparatorChar.ToString(), parts.Take(vip + 1).Concat(new [] { "unlock" }).Concat(parts.Skip(vip + 1)));
+            string expected = UnlockTarget(source);
+            if (expected == null) throw new InvalidDataException("只处理 VipSongsDownload 中的下载完成任务。");
             if (!Full(job.target).Equals(expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("输出必须位于 VipSongsDownload\\unlock。");
             for (var parent = new DirectoryInfo(Path.GetDirectoryName(source)); parent != null; parent = parent.Parent)
                 if ((parent.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("源路径包含目录链接。");
             if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0) throw new IOException("源文件为链接。");
         }
-        static void Process(Control control, bool once) {
-            Acknowledged.IntersectWith((control.jobs ?? new Job[0]).Select(job => job.id));
-            foreach (var job in control.jobs ?? new Job[0]) {
-                if (!once && !Alive()) return;
-                if (Acknowledged.Contains(job.id)) continue;
-                CurrentJob = job.id; CurrentPath = job.source;
+        // The card shows album art from a copy of the embedded cover; nothing is decoded here or fetched online.
+        static string SaveCover(string id, byte[] cover) {
+            string mime = Metadata.Mime(cover), name = new string(id.Where(c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-').ToArray());
+            if (mime == null || cover.Length > 4 * 1024 * 1024 || name.Length == 0) return "";
+            try {
+                string dir = Path.Combine(Path.GetDirectoryName(ControlPath), "covers");
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, name + (mime == "image/png" ? ".png" : ".jpg"));
+                File.WriteAllBytes(path, cover);
+                // Pruning is best effort: an old cover the plugin is reading must not cost this one.
+                try { foreach (var old in new DirectoryInfo(dir).GetFiles().OrderByDescending(f => f.LastWriteTimeUtc).Skip(8)) old.Delete(); }
+                catch (IOException) { } catch (UnauthorizedAccessException) { }
+                return path;
+            } catch (IOException) { return ""; }
+            catch (UnauthorizedAccessException) { return ""; }
+        }
+        static void Finish(Job job, string state, string path, string message, string warning = "") {
+            Attempts.Remove(job.id);
+            Results[job.id] = new { state, output = state == "success" ? path : "", message, warning };
+            Report(state, message, path, true, 0, warning);
+        }
+        // Returns true while any listed job still needs work.
+        static bool Process(Control control, bool once) {
+            var jobs = control.jobs ?? new Job[0];
+            // Results live only as long as the plugin still lists the job.
+            foreach (var id in Results.Keys.Where(id => !jobs.Any(job => job.id == id)).ToList()) Results.Remove(id);
+            bool pending = false;
+            foreach (var job in jobs) {
+                if (Results.ContainsKey(job.id)) continue;
+                pending = true;
+                if (!once && !Alive()) return true;
+                CurrentJob = job.id; CurrentPath = job.source; CurrentCover = ""; CurrentFormat = "";
                 try {
                     Validate(job);
-                    var info = new FileInfo(job.source); string signature = info.Length + ":" + info.LastWriteTimeUtc.Ticks;
+                    string signature = Signature(new FileInfo(job.source));
                     Receipt receipt;
-                    if (Receipts.TryGetValue(job.source, out receipt) && receipt.signature == signature && File.Exists(receipt.output) && new FileInfo(receipt.output).Length == receipt.length) {
-                        Acknowledged.Add(job.id); Report("success", "此下载已完成转换", receipt.output); continue;
+                    Receipts.TryGetValue(job.source, out receipt);
+                    if (receipt != null && receipt.signature == signature && File.Exists(receipt.output) && new FileInfo(receipt.output).Length == receipt.length) {
+                        Finish(job, "success", receipt.output, "此下载已完成转换"); continue;
                     }
                     Report("converting", "正在转换", job.source);
                     DateTime progressAt = DateTime.MinValue;
-                    string saved = Ncm.Extract(job.source, job.target, true, once ? (Func<bool>)(() => true) : ContinueConversion, signature, (done, total) => {
+                    var saved = Ncm.Extract(job.source, job.target, true, once ? (Func<bool>)(() => true) : ContinueConversion, signature, (done, total) => {
                         if (DateTime.UtcNow - progressAt < TimeSpan.FromMilliseconds(200)) return;
                         progressAt = DateTime.UtcNow;
                         Report("converting", "正在转换", job.source, false, (int)Math.Min(98, done * 98 / total));
+                    }, receipt, (format, cover) => {
+                        CurrentFormat = format.TrimStart('.').ToUpperInvariant(); CurrentCover = SaveCover(job.id, cover);
+                        Report("converting", "正在转换", job.source, false);
                     });
-                    Receipts[job.source] = new Receipt { signature = signature, output = saved, length = new FileInfo(saved).Length };
-                    WriteJson(ReceiptPath, Receipts);
-                    Converted++; Acknowledged.Add(job.id); Attempts.Remove(job.id);
-                    Report("success", "音频与歌曲信息已保存", saved);
-                } catch (OperationCanceledException) { return; }
+                    var output = new FileInfo(saved.path);
+                    Receipts[job.source] = new Receipt { signature = signature, output = saved.path, length = output.Length, written = output.LastWriteTimeUtc.Ticks };
+                    TryWriteJson(ReceiptPath, Receipts);
+                    Converted++;
+                    Finish(job, "success", saved.path, saved.warning.Length > 0 ? "音频已保存；" + saved.warning : "音频与歌曲信息已保存", saved.warning);
+                } catch (OperationCanceledException) { return true; }
                 catch (Exception error) {
                     int attempt; Attempts.TryGetValue(job.id, out attempt); Attempts[job.id] = ++attempt;
                     if (!once && error is IOException && attempt < 20) {
-                        Report("converting", "等待客户端释放文件", job.source, false); return;
+                        Report("converting", "等待客户端释放文件", job.source, false); return true;
                     }
-                    Failed++; Acknowledged.Add(job.id); Report("error", error.Message, job.source);
+                    Failed++; Finish(job, "error", job.source, error.Message);
                 }
             }
             if (DateTime.UtcNow - LastStatus > TimeSpan.FromSeconds(2)) Report("ready", "已就绪，等待下载完成", "", false);
+            return pending;
+        }
+        // A search the user started from the settings page. The plugin turns the reported files into jobs.
+        static object Find(ScanRequest request) {
+            var files = new List<string>();
+            int skipped = 0, seen = 0; bool more = false;
+            try {
+                if (String.IsNullOrEmpty(request.root) || !Path.IsPathRooted(request.root)) throw new InvalidDataException("下载目录无效。");
+                string root = Full(request.root);
+                if (!Path.GetFileName(root).Equals("VipSongsDownload", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("只能查找 VipSongsDownload 目录。");
+                if (!Directory.Exists(root)) throw new DirectoryNotFoundException("下载目录中还没有 VipSongsDownload。");
+                for (var parent = new DirectoryInfo(root); parent != null; parent = parent.Parent)
+                    if ((parent.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("下载目录包含目录链接。");
+                var folders = new Stack<KeyValuePair<DirectoryInfo, int>>();
+                folders.Push(new KeyValuePair<DirectoryInfo, int>(new DirectoryInfo(root), 0));
+                while (folders.Count > 0 && !more) {
+                    var folder = folders.Pop();
+                    FileSystemInfo[] entries;
+                    try { entries = folder.Key.GetFileSystemInfos(); }
+                    catch (Exception e) { if (folder.Value == 0 || (!(e is IOException) && !(e is UnauthorizedAccessException))) throw; continue; }
+                    foreach (var entry in entries) {
+                        if (++seen > 50000) { more = true; break; }
+                        if (seen % 500 == 0 && DateTime.UtcNow - LastStatus > TimeSpan.FromSeconds(1)) Report("scanning", "正在查找已有下载", "", false);
+                        if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                        var directory = entry as DirectoryInfo;
+                        if (directory != null) {
+                            if (folder.Value < 4 && !directory.Name.Equals("unlock", StringComparison.OrdinalIgnoreCase)) folders.Push(new KeyValuePair<DirectoryInfo, int>(directory, folder.Value + 1));
+                            continue;
+                        }
+                        string target = entry.Extension.Equals(".ncm", StringComparison.OrdinalIgnoreCase) ? UnlockTarget(entry.FullName) : null;
+                        if (target == null) continue;
+                        if (Done((FileInfo)entry, target)) skipped++;
+                        else if (files.Count >= 1000) { more = true; break; }
+                        else files.Add(entry.FullName);
+                    }
+                }
+                files.Sort(StringComparer.OrdinalIgnoreCase);
+                return new { id = request.id, files, skipped, more, error = "" };
+            } catch (Exception e) { return new { id = request.id, files = new List<string>(), skipped, more, error = e.Message }; }
+        }
+        // Converted before: a matching receipt, or audio with the same name already in unlock.
+        static bool Done(FileInfo file, string target) {
+            Receipt receipt;
+            if (Receipts.TryGetValue(file.FullName, out receipt) && receipt.signature == Signature(file) && File.Exists(receipt.output)) return true;
+            return File.Exists(Path.ChangeExtension(target, ".flac")) || File.Exists(Path.ChangeExtension(target, ".mp3"));
+        }
+        // Returns true while a search request is listed, so the worker stays until the plugin collects it.
+        static bool ServeScan(Control control) {
+            if (control.scan == null || String.IsNullOrEmpty(control.scan.id)) { Scan = null; return false; }
+            if (control.scan.id != ScanId) {
+                ScanId = control.scan.id;
+                Report("scanning", "正在查找已有下载", "", false);
+                Scan = Find(control.scan);
+                Report("ready", "已就绪，等待下载完成", "", false);
+            }
+            return true;
+        }
+        static void LoadReceipts() {
+            if (!File.Exists(ReceiptPath)) return;
+            try { Receipts = new Dictionary<string, Receipt>(Json.Deserialize<Dictionary<string, Receipt>>(File.ReadAllText(ReceiptPath, Utf8)), StringComparer.OrdinalIgnoreCase); }
+            catch { Report("warning", "转换记录无法读取，原文件仍被保留。"); return; }
+            // A receipt whose output is gone can neither skip nor replace anything.
+            var stale = Receipts.Where(p => p.Value == null || !File.Exists(p.Value.output)).Select(p => p.Key).ToList();
+            foreach (var key in stale) Receipts.Remove(key);
+            if (stale.Count > 0) TryWriteJson(ReceiptPath, Receipts);
         }
         public static int Main(string[] args) {
             ControlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "control.json");
             bool once = args.Length == 2 && args[0] == "--once";
             if (once) ControlPath = Path.GetFullPath(args[1]);
             StatusPath = Path.Combine(Path.GetDirectoryName(ControlPath), "status.json");
-            try {
-                using (var singleton = new FileStream(Path.Combine(Path.GetDirectoryName(ControlPath), "worker.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) {
-                    var initial = ReadControl(); Session = initial.session;
-                    if (!once && !Alive()) return 0;
+            FileStream singleton = null;
+            // An idle worker may still be exiting when the plugin starts the next one; wait briefly for its lock.
+            for (int attempt = 0; singleton == null; attempt++) {
+                try { singleton = new FileStream(Path.Combine(Path.GetDirectoryName(ControlPath), "worker.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+                catch (IOException) { if (attempt >= 30) return 2; Thread.Sleep(50); }
+            }
+            using (singleton) {
+                try {
+                    var initial = Current(); Session = initial.session;
+                    if (!once && !Alive(initial)) return 0;
                     Directory.CreateDirectory(initial.state);
                     ReceiptPath = Path.Combine(initial.state, "receipts-v3.json");
-                    if (File.Exists(ReceiptPath)) {
-                        try { Receipts = new Dictionary<string, Receipt>(Json.Deserialize<Dictionary<string, Receipt>>(File.ReadAllText(ReceiptPath, Utf8)), StringComparer.OrdinalIgnoreCase); }
-                        catch { Report("error", "转换记录无法读取，原文件仍被保留。"); }
-                    }
+                    LoadReceipts();
                     Report("ready", "已就绪，等待下载完成");
-                    do {
-                        if (!once && !Alive()) break;
-                        try { Process(ReadControl(), once); }
-                        catch (Exception e) { Failed++; Report("error", e.Message); }
+                    LastBusy = DateTime.UtcNow;
+                    string reason = "插件已关闭";
+                    while (true) {
+                        Control control;
+                        try { control = Current(); } catch { break; }
+                        if (!once && !Alive(control)) break;
+                        // Unexpected errors here belong to no song: report them without touching the card or the failure count.
+                        try { if (ServeScan(control) | Process(control, once)) LastBusy = DateTime.UtcNow; }
+                        catch (Exception e) { Report("warning", e.Message); }
                         if (once) break;
+                        if (DateTime.UtcNow - LastBusy > IdleLimit(control)) { reason = "空闲，转换程序已退出"; break; }
                         Thread.Sleep(100);
-                    } while (true);
-                    if (once || ReadControl().session == Session) Report("stopped", "插件已关闭", "", false);
+                    }
+                    bool mine;
+                    try { mine = once || Current().session == Session; } catch { mine = false; }
+                    if (mine) Report("stopped", reason, "", false);
                     return Failed > 0 ? 1 : 0;
-                }
-            } catch (IOException) { return 2; }
-            catch (Exception e) { try { Report("error", e.Message); } catch {} return 1; }
+                } catch (Exception e) { Report("warning", e.Message); return 1; }
+            }
         }
     }
     public static class Ncm {
@@ -180,7 +332,23 @@ namespace NcmBetterDownload {
             }
             throw new IOException("同名文件过多。");
         }
-        public static string Extract(string source, string target, bool embedMetadata, Func<bool> alive, string expectedSignature = null, Action<long, long> progress = null) {
+        static void WriteAudio(FileStream file, long start, long length, byte[] mask, string temp, Func<bool> alive, Action<long, long> progress) {
+            file.Position = start;
+            using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
+                byte[] buffer = new byte[64 * 1024]; long offset = 0; int count;
+                while ((count = file.Read(buffer, 0, buffer.Length)) > 0) {
+                    if (!alive()) throw new OperationCanceledException();
+                    for (int i = 0; i < count; i++) buffer[i] ^= mask[(int)((offset + i) & 255)];
+                    output.Write(buffer, 0, count); offset += count;
+                    if (progress != null) progress(offset, length);
+                }
+                if (offset != length) throw new IOException("音频读取长度发生变化。");
+                output.Flush(true);
+            }
+        }
+        // previous: the receipt of an earlier conversion of the same download; its untouched output is replaced instead of adding "(2)".
+        // header: called with the audio format and embedded cover as soon as both are known.
+        public static Extracted Extract(string source, string target, bool embedMetadata, Func<bool> alive, string expectedSignature = null, Action<long, long> progress = null, Receipt previous = null, Action<string, byte[]> header = null) {
             string temp = null;
             try {
                 // Exclusive open refuses downloads that are still held open by the client.
@@ -223,28 +391,40 @@ namespace NcmBetterDownload {
                     if (Encoding.ASCII.GetString(head) == "fLaC") format = ".flac";
                     else if (Encoding.ASCII.GetString(head, 0, 3) == "ID3" || (head[0] == 255 && (head[1] & 0xe0) == 0xe0 && (head[1] & 6) != 0 && (head[2] & 0xf0) != 0xf0)) format = ".mp3";
                     else throw new InvalidDataException("未识别到 FLAC / MP3 音频，文件可能损坏或格式不受支持。");
-                    file.Position -= 4;
+                    long audioStart = file.Position - 4;
+                    if (header != null) header(format, cover);
                     Directory.CreateDirectory(Path.GetDirectoryName(target));
                     for (var parent = new DirectoryInfo(Path.GetDirectoryName(target)); parent != null; parent = parent.Parent)
                         if ((parent.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("输出路径包含目录链接。");
-                    string dest = Unique(Path.ChangeExtension(target, format));
+                    string natural = Path.ChangeExtension(target, format);
+                    bool replace = previous != null && previous.Intact() && Path.GetExtension(previous.output).Equals(format, StringComparison.OrdinalIgnoreCase)
+                        && Path.GetDirectoryName(previous.output).Equals(Path.GetDirectoryName(natural), StringComparison.OrdinalIgnoreCase);
+                    string dest = replace ? previous.output : Unique(natural);
                     temp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
-                    using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
-                        byte[] buffer = new byte[64 * 1024]; long offset = 0; int count;
-                        while ((count = file.Read(buffer, 0, buffer.Length)) > 0) {
-                            if (!alive()) throw new OperationCanceledException();
-                            for (int i = 0; i < count; i++) buffer[i] ^= mask[(int)((offset + i) & 255)];
-                            output.Write(buffer, 0, count); offset += count;
-                            if (progress != null) progress(offset, audioLength);
+                    WriteAudio(file, audioStart, audioLength, mask, temp, alive, progress);
+                    if (!alive()) throw new OperationCanceledException();
+                    var notes = new List<string>();
+                    if (metadata.Length > 0 && plainMeta.Length == 0) notes.Add("歌曲信息无法读取");
+                    if (embedMetadata) {
+                        try {
+                            string note = Metadata.Embed(temp, format, plainMeta, cover);
+                            if (note.Length > 0) notes.Add(note);
+                        } catch (Exception) {
+                            // Tags are optional: rewrite clean audio instead of losing the song.
+                            File.Delete(temp);
+                            WriteAudio(file, audioStart, audioLength, mask, temp, alive, null);
+                            notes.Clear(); notes.Add("封面与歌曲信息写入失败，已保存原始音频");
                         }
-                        if (offset != audioLength) throw new IOException("音频读取长度发生变化。");
-                        output.Flush(true);
                     }
                     if (!alive()) throw new OperationCanceledException();
-                    if (embedMetadata) Metadata.Embed(temp, format, plainMeta, cover);
-                    if (!alive()) throw new OperationCanceledException();
-                    File.Move(temp, dest); temp = null;
-                    return dest;
+                    // Re-check just before committing: the user may have edited the old file meanwhile.
+                    if (replace && previous.Intact()) File.Replace(temp, dest, null);
+                    else {
+                        if (replace) dest = Unique(natural);
+                        File.Move(temp, dest);
+                    }
+                    temp = null;
+                    return new Extracted { path = dest, warning = String.Join("；", notes) };
                 }
             } finally { if (temp != null && File.Exists(temp)) File.Delete(temp); }
         }

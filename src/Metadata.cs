@@ -11,10 +11,24 @@ namespace NcmBetterDownload {
         static string Text(Dictionary<string, object> data, string key) {
             object value; return data.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : "";
         }
-        public static void Embed(string path, string format, byte[] json, byte[] cover) {
+        public static string Mime(byte[] cover) {
+            if (cover.Length >= 8 && cover[0] == 137 && Encoding.ASCII.GetString(cover, 1, 3) == "PNG") return "image/png";
+            if (cover.Length >= 3 && cover[0] == 255 && cover[1] == 216) return "image/jpeg";
+            return null;
+        }
+        // Skipped optional details come back as a note; only a failed tag write throws.
+        public static string Embed(string path, string format, byte[] json, byte[] cover) {
+            var notes = new List<string>();
             Dictionary<string, object> info = new Dictionary<string, object>();
-            if (json.Length > 0) info = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(json)) ?? info;
-            using (var audio = TagLib.File.Create(path, format == ".flac" ? "taglib/flac" : "taglib/mp3", TagLib.ReadStyle.Average)) {
+            if (json.Length > 0) {
+                try { info = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(json)) ?? info; }
+                catch (ArgumentException) { notes.Add("歌曲信息无法读取"); }
+                catch (InvalidOperationException) { notes.Add("歌曲信息无法读取"); }
+            }
+            string mime = cover.Length > 0 ? Mime(cover) : null;
+            if (cover.Length > 0 && mime == null) notes.Add("封面格式无法识别，未写入封面");
+            string type = format == ".flac" ? "taglib/flac" : "taglib/mp3";
+            using (var audio = TagLib.File.Create(path, type, TagLib.ReadStyle.Average)) {
                 string title = Text(info, "musicName"), album = Text(info, "album");
                 if (title.Length > 0) audio.Tag.Title = title;
                 if (album.Length > 0) audio.Tag.Album = album;
@@ -28,11 +42,7 @@ namespace NcmBetterDownload {
                     if (names.Count > 0) audio.Tag.Performers = names.ToArray();
                 }
                 uint track; if (UInt32.TryParse(Text(info, "track"), out track) && track > 0) audio.Tag.Track = track;
-                if (cover.Length > 0) {
-                    string mime;
-                    if (cover.Length >= 8 && cover[0] == 137 && Encoding.ASCII.GetString(cover, 1, 3) == "PNG") mime = "image/png";
-                    else if (cover.Length >= 3 && cover[0] == 255 && cover[1] == 216) mime = "image/jpeg";
-                    else throw new InvalidDataException("封面图片格式无法识别。");
+                if (mime != null) {
                     var picture = new TagLib.Picture(new TagLib.ByteVector(cover)) { Type = TagLib.PictureType.FrontCover, MimeType = mime, Description = "Cover" };
                     // Preserve other embedded pictures, replace only the front cover.
                     audio.Tag.Pictures = audio.Tag.Pictures.Where(p => p.Type != TagLib.PictureType.FrontCover).Concat(new TagLib.IPicture[] { picture }).ToArray();
@@ -40,11 +50,12 @@ namespace NcmBetterDownload {
                 audio.Save();
             }
             // Verify persistence before committing the final filename.
-            using (var check = TagLib.File.Create(path, format == ".flac" ? "taglib/flac" : "taglib/mp3", TagLib.ReadStyle.Average)) {
-                if (cover.Length > 0 && !check.Tag.Pictures.Any(p => p.Type == TagLib.PictureType.FrontCover && p.Data.Data.SequenceEqual(cover))) throw new IOException("封面写入验证失败。");
+            using (var check = TagLib.File.Create(path, type, TagLib.ReadStyle.Average)) {
+                if (mime != null && !check.Tag.Pictures.Any(p => p.Type == TagLib.PictureType.FrontCover && p.Data.Data.SequenceEqual(cover))) throw new IOException("封面写入验证失败。");
                 string title = Text(info, "musicName");
                 if (title.Length > 0 && check.Tag.Title != title) throw new IOException("歌曲标签写入验证失败。");
             }
+            return String.Join("；", notes);
         }
     }
 }
